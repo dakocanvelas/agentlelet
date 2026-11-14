@@ -1,0 +1,1 @@
+{"description":"snarkjs-in-Worker test for the Agent Games Gatekeeper circuit","name":"lucax-snarkjs-test","private":true,"scripts":{"deploy":"wrangler deploy","dev":"wrangler dev"},"type":"module","version":"0.1.0","dependencies":{"snarkjs":"^0.7.5"}}

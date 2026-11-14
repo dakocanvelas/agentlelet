@@ -1,0 +1,5 @@
+# Local dev secrets ONLY. Copy to .dev.vars (gitignored) for `wrangler dev`.
+# NEVER commit .dev.vars. NEVER put real values in this example file.
+# Production: `wrangler secret put HMAC_SECRET` and `wrangler secret put KURIER_API_KEY`.
+HMAC_SECRET=
+KURIER_API_KEY=

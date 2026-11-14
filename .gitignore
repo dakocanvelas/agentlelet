@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+*.log
+# Test artifacts: downloaded from agentgames.zkverify.io, not committed.
+test/*.wasm
+test/*.zkey
+test/*.wtns
+test/worker-test/node_modules/

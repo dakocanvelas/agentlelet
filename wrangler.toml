@@ -1,0 +1,7 @@
+name = "lucax"
+main = "src/index.js"
+compatibility_date = "2026-11-14"
+
+# No paid features. Free tier only.
+# Secrets are set via `wrangler secret put HMAC_SECRET` / `wrangler secret put KURIER_API_KEY`
+# — never in this file, never in the repo.
