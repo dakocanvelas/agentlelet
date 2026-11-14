@@ -6,4 +6,10 @@ node_modules/
 test/*.wasm
 test/*.zkey
 test/*.wtns
+test/worker-test/src/*.wasm
 test/worker-test/node_modules/
+# Prover artifacts + deps: downloaded/installed at build time, not committed.
+prover/*.wasm
+prover/*.zkey
+prover/*.wtns
+prover/node_modules/

@@ -21,11 +21,23 @@ if (typeof URL.createObjectURL !== "function") {
   }
 }
 
+// Deploy-time WASM module import: compiled by Cloudflare at deploy time,
+// NOT at runtime. If this instantiates, the "pre-compiled WASM" mechanism
+// works in Workers — and any remaining snarkjs failure is ffjavascript's
+// own runtime WASM compile, not the circuit WASM.
+import gkWasmModule from "./gatekeeper.wasm";
+
 const WASM_URL = "https://agentgames.zkverify.io/circuits/gatekeeper.wasm";
 const ZKEY_URL = "https://agentgames.zkverify.io/circuits/gatekeeper_final.zkey";
 
-// 11 of 13 circuit inputs, discovered by probing the real wasm (see ../SNARKJS-TEST.md).
-const INPUT_11 = {
+// All 13 circuit inputs — the 2 missing names (registeredVkHash, proofVkHash)
+// were recovered 15 Nov 2026 by extracting the FNV-1a signal hashes from the
+// WASM data section and dictionary-attacking them (see ../SNARKJS-TEST.md).
+// vk hashes are 256-bit; the circuit takes them mod the BN254 field prime.
+const VK_HASH_MOD_P = "4836144126773920907502496244340012141465762957689769435993496290439317388578";
+const INPUT_13 = {
+  registeredVkHash: VK_HASH_MOD_P,
+  proofVkHash: VK_HASH_MOD_P,
   minimum: "1000",
   publicBalance: "1460",
   expiryBlock: "19842201",
@@ -65,10 +77,89 @@ export default {
       }
     }
 
+    if (url.pathname === "/wasmmodule") {
+      // Task 3(a): does a deploy-time-compiled WASM module instantiate in a Worker?
+      const t0 = Date.now();
+      try {
+        const memory = new WebAssembly.Memory({ initial: 1024 });
+        const instance = await WebAssembly.instantiate(gkWasmModule, {
+          env: { memory },
+          runtime: {
+            exceptionHandler: () => {},
+            printErrorMessage: () => {},
+            writeBufferMessage: () => {},
+            showSharedRWMemory: () => {},
+          },
+        });
+        const inputSize = instance.exports.getInputSize();
+        const version = instance.exports.getVersion ? instance.exports.getVersion() : null;
+        return json({
+          precompiled_wasm_module: "INSTANTIATED",
+          getInputSize: inputSize,
+          getVersion: version,
+          expected_input_size: 13,
+          match: inputSize === 13,
+          ms: Date.now() - t0,
+          conclusion:
+            "Deploy-time WASM modules DO work in Workers. The circuit WASM is NOT the blocker.",
+        });
+      } catch (e) {
+        return json(
+          {
+            precompiled_wasm_module: "FAILED",
+            error: String(e.message || e).slice(0, 300),
+            ms: Date.now() - t0,
+          },
+          500,
+        );
+      }
+    }
+
+    if (url.pathname === "/snarkjs-precompiled") {
+      // Same question, one level up: with all 13 inputs known AND the circuit
+      // WASM proven instantiable as a pre-compiled module, can snarkjs prove?
+      // Expected: NO — ffjavascript compiles its OWN curve WASM at first use.
+      const t0 = Date.now();
+      const steps = {};
+      try {
+        const snarkjs = await loadSnarkjs();
+        steps.import_snarkjs = { ok: true };
+        const zkeyRes = await fetch(ZKEY_URL);
+        const zkeyBytes = new Uint8Array(await zkeyRes.arrayBuffer());
+        steps.fetch_zkey = { ok: zkeyRes.ok, bytes: zkeyBytes.length };
+        // NOTE: snarkjs's API takes wasm bytes/path, not a pre-compiled
+        // instance — it compiles the circuit WASM itself. That is exactly
+        // the point: even the circuit-WASM side goes through runtime compile.
+        const t1 = Date.now();
+        try {
+          const { proof, publicSignals } = await snarkjs.groth16.fullProve(
+            INPUT_13,
+            new Uint8Array(await (await fetch(WASM_URL)).arrayBuffer()),
+            zkeyBytes,
+          );
+          steps.fullProve = { ok: true, unexpected: "proof generated in Worker", publicSignals, ms: Date.now() - t1 };
+          steps.verdict = "UNEXPECTED_SUCCESS";
+        } catch (e) {
+          const msg = String(e.message || e);
+          steps.fullProve = { ok: false, error: msg.slice(0, 300), ms: Date.now() - t1 };
+          steps.verdict = msg.includes("disallowed by embedder")
+            ? "FFJAVASCRIPT_BLOCKER_CONFIRMED"
+            : "FAIL_OTHER";
+        }
+        steps.total_ms = Date.now() - t0;
+        return json(steps);
+      } catch (e) {
+        steps.fatal = { error: String(e.message || e).slice(0, 300) };
+        steps.verdict = "FAIL";
+        return json(steps, 500);
+      }
+    }
+
     if (url.pathname !== "/test") {
       return json({
         test: "snarkjs-in-worker",
         run: "GET /test",
+        also: ["GET /wasmcheck", "GET /wasmmodule", "GET /snarkjs-precompiled"],
         note: "Fetches the real gatekeeper wasm+zkey and runs snarkjs in this Worker.",
       });
     }
@@ -110,26 +201,28 @@ export default {
         steps.zkey_parse = { ok: false, error: String(e.message || e).slice(0, 300), ms: Date.now() - t2 };
       }
 
-      // Step 3: witness calculation via fullProve with the 11 known inputs.
-      // Expected: "Not all inputs have been set. Only 11 out of 13".
+      // Step 3: witness calculation via fullProve with all 13 inputs (now known).
+      // Expected: FAIL with "Wasm code generation disallowed by embedder"
+      // (ffjavascript's own WASM compile), NOT "Not all inputs".
       const t3 = Date.now();
       try {
-        const { proof, publicSignals } = await snarkjs.groth16.fullProve(INPUT_11, wasmBytes, zkeyBytes);
-        steps.fullProve = { ok: true, unexpected: "proof generated with 11 inputs", publicSignals, ms: Date.now() - t3 };
+        const { proof, publicSignals } = await snarkjs.groth16.fullProve(INPUT_13, wasmBytes, zkeyBytes);
+        steps.fullProve = { ok: true, unexpected: "proof generated with 13 inputs", publicSignals, ms: Date.now() - t3 };
       } catch (e) {
         const msg = String(e.message || e);
         steps.fullProve = {
           ok: false,
           error: msg.slice(0, 300),
           means_wasm_ran: msg.includes("Not all inputs"),
+          means_ffjavascript_blocked: msg.includes("disallowed by embedder"),
           ms: Date.now() - t3,
         };
       }
 
       steps.total_ms = Date.now() - t0;
       steps.verdict =
-        steps.import_snarkjs.ok && steps.fetch_artifacts.ok && steps.zkey_parse.ok && steps.fullProve.means_wasm_ran
-          ? "PIPELINE_WORKS_PENDING_INPUTS"
+        steps.import_snarkjs.ok && steps.fetch_artifacts.ok && steps.fullProve.means_ffjavascript_blocked
+          ? "FAIL_FFJAVASCRIPT_BLOCKER"
           : "FAIL";
       return json(steps);
     } catch (e) {

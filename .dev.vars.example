@@ -1,5 +1,10 @@
 # Local dev secrets ONLY. Copy to .dev.vars (gitignored) for `wrangler dev`.
 # NEVER commit .dev.vars. NEVER put real values in this example file.
-# Production: `wrangler secret put HMAC_SECRET` and `wrangler secret put KURIER_API_KEY`.
+# Production: `wrangler secret put HMAC_SECRET`, `wrangler secret put KURIER_API_KEY`,
+# `wrangler secret put PROVER_SHARED_SECRET` (same value as the prover host).
+# PROVER_URL is a plain variable (not a secret): set it in wrangler.toml [vars]
+# or `wrangler dev --var PROVER_URL=http://localhost:3000`.
 HMAC_SECRET=
 KURIER_API_KEY=
+PROVER_SHARED_SECRET=
+PROVER_URL=

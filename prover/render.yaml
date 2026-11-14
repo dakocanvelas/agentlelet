@@ -1,0 +1,20 @@
+# Render blueprint: one free web service (512MB, 750 instance-hours/mo).
+# Deploy: connect this repo on render.com -> New -> Blueprint -> pick render.yaml.
+# Then set the PROVER_SHARED_SECRET env var in the Render dashboard (same
+# random value as the Worker's PROVER_SHARED_SECRET wrangler secret).
+# Free tier sleeps after 15 min idle — keep it warm with a ping every 10 min
+# (Cloudflare cron trigger on the Worker, or UptimeRobot free). See README.md.
+services:
+  - type: web
+    name: lucax-gatekeeper-prover
+    plan: free
+    runtime: node
+    rootDir: prover
+    buildCommand: npm install --omit=dev && bash fetch-artifacts.sh
+    startCommand: node server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PROVER_SHARED_SECRET
+        sync: false

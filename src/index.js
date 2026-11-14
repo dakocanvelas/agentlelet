@@ -1,34 +1,39 @@
 // lucax — verification-first agent for Agent Games (zkVerify)
 // Agent: lucax | Handle: raraza | Repo: https://github.com/dakocanvelas/agentlelet
 // Public endpoint for the Wildcard track. No dependencies, Web APIs only.
-// Secrets (HMAC_SECRET, KURIER_API_KEY) come from environment secrets only —
-// NEVER hardcode them here or in the repo.
+// Secrets (HMAC_SECRET, KURIER_API_KEY, PROVER_SHARED_SECRET) come from
+// environment secrets only — NEVER hardcode them here or in the repo.
 //
 // Routes:
 //   GET  /          agent card
 //   GET  /health    health check (used by the Agent Games platform)
 //   POST /verify    real verification of a claim: {"type":"url"|"contract"|"text","value":"..."}
 //   POST /task      Gatekeeper task endpoint: HMAC verify + 7 trap field checks +
-//                   idempotency + decision. Response shape matches the platform
-//                   spec: {decision, reason_code, proof_tx}, signed with
-//                   x-agent-games-signature when HMAC_SECRET is configured.
+//                   Groth16 proof via the external Node prover + idempotency +
+//                   decision. Response shape matches the platform spec:
+//                   {decision, reason_code, proof_tx, proof, public_signals},
+//                   signed with x-agent-games-signature when HMAC_SECRET is set.
 //
 // Gatekeeper decision logic (from the official trap encyclopedia, event page
 // /events/proof-gatekeeper): the 7 checks are deterministic field comparisons,
 // and the page states all trap types are documented and field-detectable.
-// Approval therefore rests on the field checks. Two honest gaps, recorded
-// in README + test/snarkjs-test.md:
-//   (a) Groth16 proof generation does NOT work in Workers (runtime disallows
-//       dynamic WASM compilation — proven live, see test/). A correct decision
-//       without our proof costs -2 and no reliability bonus, per the rules.
-//   (b) The on-chain confirmation of the task's proof_tx via Kurier is not
-//       yet wired in; it would catch a proof that is not on-chain at all,
-//       a case outside the 7 documented trap types.
+// Approval therefore rests on the field checks. Proof generation runs OFF
+// Workers (see prover/): snarkjs cannot run in a Worker (runtime bans
+// dynamic WASM compilation — proven live, see test/SNARKJS-TEST.md). The
+// Worker asks the prover for a proof of its decision; the circuit only
+// proves CORRECT decisions, so if the prover flips the decision the flip
+// is authoritative (the circuit is the referee). If the prover is slow or
+// down (>25s), the Worker returns the decision WITHOUT a proof instead of
+// timing out — a correct decision without proof still scores +10.
+// One honest gap remains: the on-chain confirmation of the task's proof_tx
+// via Kurier is not yet wired in; it would catch a proof that is not
+// on-chain at all, a case outside the 7 documented trap types. (Needs the
+// user's Kurier key — separate next step.)
 
 const AGENT = {
   name: "lucax",
   handle: "raraza",
-  version: "0.2.0",
+  version: "0.3.0",
   description:
     "Verification-first agent: it verifies before it acts. Checks live facts (URL reachability, on-chain contract code, Gatekeeper task fields) before trusting a claim, and proves every step with evidence.",
   tracks: ["wildcard", "gatekeeper"],
@@ -274,13 +279,46 @@ function gatekeeperFieldChecks(input, proofTx) {
     if (BigInt(input.public_balance) < BigInt(input.minimum)) return "THRESHOLD_MISMATCH";
   }
   if (input.current_block != null && input.expiry_block != null) {
-    if (Number(input.current_block) > Number(input.expiry_block)) return "EXPIRED_CONDITION";
+    // STRICT: current == expiry is EXPIRED. Proven against the real circuit
+    // (15 Nov 2026): APPROVE at current==expiry fails the witness assert,
+    // so the circuit requires currentBlock < expiryBlock.
+    if (BigInt(input.current_block) >= BigInt(input.expiry_block)) return "EXPIRED_CONDITION";
   }
   if (!eqAddr(input.recipient, input.condition_recipient)) return "RECIPIENT_MISMATCH";
   if (input.amount != null && input.max_transfer != null) {
     if (BigInt(input.amount) > BigInt(input.max_transfer)) return "AMOUNT_OVERFLOW";
   }
   return null;
+}
+
+// Ask the external Node prover (prover/server.mjs) for a Groth16 proof of
+// a Gatekeeper decision. Returns the prover's result object on success, or
+// null on any failure (caller falls back to the no-proof path). 25s hard
+// cap — the platform's task deadline is 60s, and a correct decision
+// without a proof still scores +10, so the prover must never eat the task.
+async function requestProof(env, taskId, input, decision, proofTx) {
+  const url = String(env.PROVER_URL || "").replace(/\/$/, "") + "/prove";
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(env.PROVER_SHARED_SECRET ? { "x-prover-secret": env.PROVER_SHARED_SECRET } : {}),
+      },
+      body: JSON.stringify({ task_id: taskId, input, decision, proof_tx: proofTx }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || !data.ok || !data.proof || !data.publicSignals) return null;
+    return data;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function handleTask(request, env) {
@@ -339,13 +377,28 @@ async function handleTask(request, env) {
   // Gatekeeper: run the 7 field checks. A pass on all 7 is an APPROVE:
   // per the published trap encyclopedia, every trap type is field-detectable.
   const trap = gatekeeperFieldChecks(input, proofTx);
-  let decision;
-  if (trap) {
-    decision = { decision: "REJECT", reason_code: trap, proof_tx: proofTx };
-  } else {
-    decision = { decision: "APPROVE", reason_code: "VALID_CONDITION", proof_tx: proofTx };
-    if (proofTx) acceptedProofTx.add(proofTx);
+  let decision = trap
+    ? { decision: "REJECT", reason_code: trap, proof_tx: proofTx }
+    : { decision: "APPROVE", reason_code: "VALID_CONDITION", proof_tx: proofTx };
+
+  // Groth16 proof via the external Node prover (prover/server.mjs). The
+  // circuit only proves CORRECT decisions, so a prover flip is
+  // authoritative — use the prover's decision + reason_code when present.
+  // On prover failure/timeout the decision stands WITHOUT a proof.
+  if (env.PROVER_URL && taskId) {
+    const proof = await requestProof(env, taskId, input, decision.decision, proofTx);
+    if (proof) {
+      decision = {
+        decision: proof.decision,
+        reason_code: proof.reason_code,
+        proof_tx: proofTx,
+        proof: proof.proof,
+        public_signals: proof.publicSignals,
+      };
+    }
   }
+
+  if (decision.decision === "APPROVE" && proofTx) acceptedProofTx.add(proofTx);
 
   const resp = await signResponse(decision);
   if (taskId) {
@@ -379,7 +432,8 @@ export default {
         kurier_configured: Boolean(env.KURIER_API_KEY),
         gatekeeper: {
           field_checks: "ready",
-          proof_generation: "not_possible_on_workers",
+          proof_generation: env.PROVER_URL ? "external_prover" : "not_configured (no-proof +10 path)",
+          prover_configured: Boolean(env.PROVER_URL),
           onchain_proof_check: env.KURIER_API_KEY ? "ready" : "pending_kurier_key",
         },
       });
