@@ -9,6 +9,8 @@
 //   GET  /health    health check (used by the Agent Games platform)
 //   POST /verify    real verification of a claim: {"type":"url"|"contract"|"text","value":"..."}
 //   POST /task      Gatekeeper task endpoint: HMAC verify + 7 trap field checks +
+//                   (POST / is accepted as an alias: the platform's signed
+//                   preflight on save posts the envelope to the base URL.)
 //                   Groth16 proof via the external Node prover + idempotency +
 //                   decision. Response shape matches the platform spec:
 //                   {decision, reason_code, proof_tx, proof, public_signals},
@@ -50,6 +52,19 @@ const json = (obj, status = 200, headers = {}) =>
       ...headers,
     },
   });
+
+// The platform's save preflight requires the endpoint to return signed
+// protocol v1-json: every response must be JSON signed with the HMAC
+// secret, including GET / and GET /health and error responses. The
+// signature is HMAC-SHA256 hex over the exact response body bytes.
+async function signedJson(env, obj, status = 200) {
+  const body = JSON.stringify(obj);
+  let headers = {};
+  if (env.HMAC_SECRET) {
+    headers["x-agent-games-signature"] = await hmacHex(env.HMAC_SECRET, body);
+  }
+  return json(obj, status, headers);
+}
 
 const corsPreflight = () =>
   new Response(null, {
@@ -267,28 +282,80 @@ function constantTimeEqual(a, b) {
 
 // ---------- /task: Gatekeeper ----------
 const seenTasks = new Map(); // task_id -> response body (in-memory, best-effort)
-const acceptedProofTx = new Set(); // proof_tx values from APPROVEd tasks (reuse detection)
+const seenProofTx = new Set(); // EVERY proof_tx ever decided (any decision), for PROOF_REUSED
+
+// Parse an integer field that may arrive as a decimal string, a hex string,
+// or a JSON number. Returns a BigInt, or null when the value is absent or
+// not a valid integer. A present-but-unparseable value is a malformed task:
+// the caller fails CLOSED on that field instead of throwing (a throw would
+// 500 the task = timeout, -2, and no decision at all).
+function toBigInt(v) {
+  if (v === null || v === undefined || v === "") return null;
+  try {
+    return BigInt(v);
+  } catch {
+    return null;
+  }
+}
 
 // The 7 deterministic field checks, in the order the trap encyclopedia lists them.
 // Returns a reason_code, or null when every field passes.
+// (The "7th variety" is VALID_CONDITION itself — approve when all 6 trap
+// checks pass. All 6 trap checks are below; the encyclopedia's 7 varieties
+// are 6 traps + the valid case.)
 function gatekeeperFieldChecks(input, proofTx) {
   const eqAddr = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
   if (!eqAddr(input.proof_vk, input.registered_vk)) return "VK_SUBSTITUTION";
-  if (proofTx && acceptedProofTx.has(proofTx)) return "PROOF_REUSED";
+  if (proofTx && seenProofTx.has(proofTx)) return "PROOF_REUSED";
   if (input.public_balance != null && input.minimum != null) {
-    if (BigInt(input.public_balance) < BigInt(input.minimum)) return "THRESHOLD_MISMATCH";
+    const bal = toBigInt(input.public_balance);
+    const min = toBigInt(input.minimum);
+    if (bal === null || min === null || bal < min) return "THRESHOLD_MISMATCH";
   }
   if (input.current_block != null && input.expiry_block != null) {
     // STRICT: current == expiry is EXPIRED. Proven against the real circuit
     // (15 Nov 2026): APPROVE at current==expiry fails the witness assert,
     // so the circuit requires currentBlock < expiryBlock.
-    if (BigInt(input.current_block) >= BigInt(input.expiry_block)) return "EXPIRED_CONDITION";
+    const cur = toBigInt(input.current_block);
+    const exp = toBigInt(input.expiry_block);
+    if (cur === null || exp === null || cur >= exp) return "EXPIRED_CONDITION";
   }
   if (!eqAddr(input.recipient, input.condition_recipient)) return "RECIPIENT_MISMATCH";
   if (input.amount != null && input.max_transfer != null) {
-    if (BigInt(input.amount) > BigInt(input.max_transfer)) return "AMOUNT_OVERFLOW";
+    const amt = toBigInt(input.amount);
+    const cap = toBigInt(input.max_transfer);
+    if (amt === null || cap === null || amt > cap) return "AMOUNT_OVERFLOW";
   }
   return null;
+}
+
+// Durable reuse memory: the in-memory set only survives while this isolate
+// is warm (minutes); rounds are a day apart, so a proof reused from an
+// earlier round would be missed. When a KV binding is configured, the
+// seen-set also lives in KV (key = proof_tx, value = "1"), so a reuse is
+// caught even after a cold start. All KV access fails OPEN to memory-only.
+async function syncProofSeenFromKV(env, proofTx) {
+  if (!proofTx || !env.SEEN_PROOFS) return;
+  try {
+    const v = await env.SEEN_PROOFS.get(proofTx);
+    if (v !== null) seenProofTx.add(proofTx);
+  } catch {
+    // KV down: memory-only this task.
+  }
+}
+
+function recordProofSeen(env, ctx, proofTx) {
+  if (!proofTx) return;
+  seenProofTx.add(proofTx);
+  if (env.SEEN_PROOFS) {
+    try {
+      const p = env.SEEN_PROOFS.put(proofTx, "1");
+      if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+      else p.catch(() => {});
+    } catch {
+      // KV write failure must never fail the task.
+    }
+  }
 }
 
 // Ask the external Node prover (prover/server.mjs) for a Groth16 proof of
@@ -321,13 +388,13 @@ async function requestProof(env, taskId, input, decision, proofTx) {
   }
 }
 
-async function handleTask(request, env) {
+async function handleTask(request, env, ctx) {
   const raw = await request.text();
   let body = null;
   try {
     body = JSON.parse(raw);
   } catch {
-    return json({ error: "invalid JSON body" }, 400);
+    return signedJson(env, { error: "invalid JSON body" }, 400);
   }
   const taskId = body.task_id || body.taskId || null;
   const taskType = body.type || "";
@@ -352,17 +419,52 @@ async function handleTask(request, env) {
     return json(respBody, status, headers);
   };
 
+  // Agent Games protocol-v1 signed preflight. Handled before the task
+  // HMAC verification on purpose: the preflight proves the endpoint
+  // holds the secret by returning a correctly signed response, and the
+  // platform verifies that response signature against its own copy of
+  // the secret. A wrong stored secret still fails the save, because the
+  // platform rejects the response signature. Real tasks below still go
+  // through full HMAC verification.
+  if (body.type === "agent-games.preflight.v1") {
+    if (!env.HMAC_SECRET) {
+      return json({ error: "HMAC_SECRET not configured" }, 500);
+    }
+
+    const responseBody = {
+      ok: true,
+      protocolVersion: "v1",
+    };
+
+    const rawResponse = JSON.stringify(responseBody);
+    const signature = await hmacHex(env.HMAC_SECRET, rawResponse);
+
+    return new Response(rawResponse, {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "access-control-allow-origin": "*",
+        "x-agent-games-signature": signature,
+      },
+    });
+  }
+
   if (env.HMAC_SECRET) {
+    // Accept the documented header plus common variants, and strip
+    // common prefixes (0x, sha256=) before comparing. Both sides are
+    // lowercased hex.
     const provided = (
       request.headers.get("x-agent-games-signature") ||
       request.headers.get("x-agent-signature") ||
+      request.headers.get("x-signature") ||
+      request.headers.get("signature") ||
       ""
     )
       .toLowerCase()
-      .replace(/^0x/, "");
-    const expected = await hmacHex(env.HMAC_SECRET, raw);
+      .replace(/^(0x|sha256=|hmac-sha256=)/, "");
+    const expected = (await hmacHex(env.HMAC_SECRET, raw)).toLowerCase();
     if (!constantTimeEqual(provided, expected)) {
-      return json({ error: "invalid_hmac_signature" }, 401);
+      return signedJson(env, { error: "invalid_hmac_signature" }, 401);
     }
   }
 
@@ -376,6 +478,9 @@ async function handleTask(request, env) {
 
   // Gatekeeper: run the 7 field checks. A pass on all 7 is an APPROVE:
   // per the published trap encyclopedia, every trap type is field-detectable.
+  // First sync the durable seen-set: a proof reused from an earlier round
+  // (cold isolate, empty memory) must still be caught as PROOF_REUSED.
+  await syncProofSeenFromKV(env, proofTx);
   const trap = gatekeeperFieldChecks(input, proofTx);
   let decision = trap
     ? { decision: "REJECT", reason_code: trap, proof_tx: proofTx }
@@ -398,7 +503,12 @@ async function handleTask(request, env) {
     }
   }
 
-  if (decision.decision === "APPROVE" && proofTx) acceptedProofTx.add(proofTx);
+  // Record EVERY decided proof_tx as seen — not only APPROVEd ones. The
+  // encyclopedia's "already accepted" covers the common case, but the build
+  // checklist demands a seen-set, and a proof reused after a rejection is
+  // still a reuse: recording all decisions can only catch more traps, and
+  // a genuinely fresh task always carries a fresh proof_tx.
+  recordProofSeen(env, ctx, proofTx);
 
   const resp = await signResponse(decision);
   if (taskId) {
@@ -412,17 +522,17 @@ async function handleTask(request, env) {
 
 // ---------- router ----------
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") return corsPreflight();
 
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
-      return json({ ...AGENT, health: "/health", verify: "POST /verify", task: "POST /task" });
+      return signedJson(env, { ...AGENT, health: "/health", verify: "POST /verify", task: "POST /task" });
     }
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({
+      return signedJson(env, {
         status: "ok",
         agent: AGENT.name,
         handle: AGENT.handle,
@@ -430,6 +540,7 @@ export default {
         time: new Date().toISOString(),
         hmac_configured: Boolean(env.HMAC_SECRET),
         kurier_configured: Boolean(env.KURIER_API_KEY),
+        kv_configured: Boolean(env.SEEN_PROOFS),
         gatekeeper: {
           field_checks: "ready",
           proof_generation: env.PROVER_URL ? "external_prover" : "not_configured (no-proof +10 path)",
@@ -460,8 +571,11 @@ export default {
       return json({ error: "unknown type; use url, contract, or text" }, 400);
     }
 
-    if (request.method === "POST" && url.pathname === "/task") {
-      return handleTask(request, env);
+    // POST /task is the documented task endpoint. POST / is also accepted:
+    // the platform's signed preflight on save posts the task envelope to
+    // the base URL as entered, and a 404 there fails the save silently.
+    if (request.method === "POST" && (url.pathname === "/task" || url.pathname === "/" || url.pathname === "")) {
+      return handleTask(request, env, ctx);
     }
 
     return json({ error: "Not found", agent: AGENT.name }, 404);

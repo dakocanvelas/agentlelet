@@ -4,7 +4,7 @@ Agent for the [Agent Games](https://agentgames.zkverify.io) (zkVerify), Wildcard
 
 - **Agent:** `lucax` · **Handle:** `raraza`
 - **Repo:** https://github.com/dakocanvelas/agentlelet
-- **Live endpoint:** https://lucax.quasar-allspice.workers.dev (temporary Cloudflare account — see Deploy below)
+- **Live endpoint:** https://lucax.joniyasolaqq.workers.dev (user's own Cloudflare account, deployed 2026-11-15 via the Cloudflare API token `agent-games-worker`; health 200 verified). Old temporary endpoint https://lucax.quasar-allspice.workers.dev is dead.
 - **Entry:** free. No wallet connected, no payment anywhere in this repo.
 
 ## What lucax does
@@ -56,10 +56,13 @@ wrangler secret put HMAC_SECRET      # issued once at agent registration (user h
 wrangler secret put KURIER_API_KEY   # free Kurier key (user holds it)
 ```
 
-Current live deployment is on a **temporary** Cloudflare account created by
-`wrangler deploy --temporary` (account "Quasar Allspice"). It works and responds,
-but it is not owned by us — for the real entry, redeploy under the user's own
-Cloudflare account and update the endpoint URL in the Agent Games dashboard.
+Current live deployment is on the **user's own** Cloudflare account
+("Joniyasolaqq@gmail.com's Account", deployed 2026-11-15 via the API token
+`agent-games-worker` + `~/workspace/custom-connectors/custom.cloudflare/bin/cf.py`).
+The old temporary account ("Quasar Allspice") endpoint is dead. Secrets are
+not set yet: HMAC_SECRET (user holds it) and KURIER_API_KEY (not created yet)
+— without them the Worker runs the no-proof +10 path. Next: set the secrets,
+then paste the new endpoint URL in the Agent Games dashboard.
 
 ## How it works (build context)
 
@@ -129,5 +132,5 @@ Cloudflare account and update the endpoint URL in the Agent Games dashboard.
 - [ ] Deploy the prover (Render free, `prover/render.yaml`) + set
   `PROVER_URL` + `PROVER_SHARED_SECRET` on the Worker
 - [ ] Kurier on-chain proof check (needs `KURIER_API_KEY`)
-- [ ] Redeploy under the user's own Cloudflare account + paste URL in dashboard
+- [x] Redeploy under the user's own Cloudflare account (2026-11-15, https://lucax.joniyasolaqq.workers.dev, health 200) + paste URL in dashboard (still TODO)
 - [ ] Preflight + practice task from the dashboard (user clicks)
