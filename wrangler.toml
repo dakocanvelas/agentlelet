@@ -5,3 +5,9 @@ compatibility_date = "2026-11-14"
 # No paid features. Free tier only.
 # Secrets are set via `wrangler secret put HMAC_SECRET` / `wrangler secret put KURIER_API_KEY`
 # — never in this file, never in the repo.
+# KV binding (live since 15 Nov 12:10 WIB, namespace id aa06f26a32f649e9be79a6c6074bd5d0):
+# deploys go through cf.py, NOT wrangler — every upload must pass
+# --kv SEEN_PROOFS=aa06f26a32f649e9be79a6c6074bd5d0 or the binding is wiped.
+[[kv_namespaces]]
+binding = "SEEN_PROOFS"
+id = "aa06f26a32f649e9be79a6c6074bd5d0"
