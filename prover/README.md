@@ -63,12 +63,9 @@ curl -s localhost:3000/prove -X POST -H 'content-type: application/json' -d '{
    free). The Worker treats a slow prover (>25s) as "no proof" and falls
    back to the +10 no-proof path — it never lets the prover eat the task.
 
-## Deploy (free alternative) — Vercel Hobby
+## Deploy (free, no card) — Vercel Hobby
 
-Same `server.mjs` logic as `api/prove.js` (Node serverless function, 10s
-limit — a ~1s proof fits, but with less headroom than Render). Not
-built here; Render is the primary recommendation because it is a plain
-long-running Node process with no per-request time limit.
+BUILT 15 Nov 2026 (`api/prove.js` + `api/health.js` + `vercel.json`) — Render turned out to REQUIRE a credit card for identity verification even on the Free tier (verified live 15 Nov), so Vercel Hobby is the card-free route: free forever, no card required, personal non-commercial use. Same proving flow as `server.mjs` (prove-or-flip, local vkey verification, shared-secret auth). Hobby limit: 10s per invocation — a proof takes 0.5–2.1s (measured locally), so it fits, but a cold start eats into the budget; the Worker treats a slow prover as "no proof" and falls back to +10. Deploy: import the repo in Vercel, Root Directory `prover`, Install Command `npm install --omit=dev`, Build Command `bash fetch-artifacts.sh`, env `PROVER_SHARED_SECRET` (same value as the Worker secret), then the service is live at `https://<project>.vercel.app` (`/api/prove`, `/api/health`). Tested locally 15 Nov: health ok, APPROVE 1067ms, flip-to-REJECT 391ms, wrong/missing secret → 401.
 
 ## What it does NOT do
 
