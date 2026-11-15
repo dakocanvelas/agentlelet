@@ -28,7 +28,7 @@ Well inside the 60s task window.
 ```bash
 npm install
 npm run fetch-artifacts   # downloads wasm+zkey from agentgames.zkverify.io, verifies sha256
-node server.mjs           # :3000 — GET /health, POST /prove (localhost only without a secret)
+node standalone/server.mjs  # :3000 — GET /health, POST /prove (localhost only without a secret)
 ```
 
 Test a proof:
@@ -65,7 +65,7 @@ curl -s localhost:3000/prove -X POST -H 'content-type: application/json' -d '{
 
 ## Deploy (free, no card) — Vercel Hobby
 
-BUILT 15 Nov 2026 (`api/prove.js` + `api/health.js` + `vercel.json`) — Render turned out to REQUIRE a credit card for identity verification even on the Free tier (verified live 15 Nov), so Vercel Hobby is the card-free route: free forever, no card required, personal non-commercial use. Same proving flow as `server.mjs` (prove-or-flip, local vkey verification, shared-secret auth). Hobby limit: 10s per invocation — a proof takes 0.5–2.1s (measured locally), so it fits, but a cold start eats into the budget; the Worker treats a slow prover as "no proof" and falls back to +10. Deploy: import the repo in Vercel, Root Directory `prover`, Install Command `npm install --omit=dev`, Build Command `bash fetch-artifacts.sh`, env `PROVER_SHARED_SECRET` (same value as the Worker secret), then the service is live at `https://<project>.vercel.app` (`/api/prove`, `/api/health`). Tested locally 15 Nov: health ok, APPROVE 1067ms, flip-to-REJECT 391ms, wrong/missing secret → 401.
+BUILT 15 Nov 2026 (`api/prove.js` + `api/health.js` + `vercel.json`) — Render turned out to REQUIRE a credit card for identity verification even on the Free tier (verified live 15 Nov), so Vercel Hobby is the card-free route: free forever, no card required, personal non-commercial use. Same proving flow as `standalone/server.mjs` (prove-or-flip, local vkey verification, shared-secret auth). Hobby limit: 10s per invocation — a proof takes 0.5–2.1s (measured locally), so it fits, but a cold start eats into the budget; the Worker treats a slow prover as "no proof" and falls back to +10. Deploy: import the repo in Vercel, Root Directory `prover`, Install Command `npm install --omit=dev`, Build Command `bash fetch-artifacts.sh`, env `PROVER_SHARED_SECRET` (same value as the Worker secret), then the service is live at `https://<project>.vercel.app` (`/api/prove`, `/api/health`). Tested locally 15 Nov: health ok, APPROVE 1067ms, flip-to-REJECT 391ms, wrong/missing secret → 401. Vercel lesson (15 Nov): the standalone server MUST NOT live at the Vercel root — Vercel auto-detects `server.{js,mjs}` at the project root as the entrypoint and routes ALL requests to it, so `api/` functions never build (verified live: `/api/health` 404'd from `server.mjs`, `/health` artifacts false). That is why it lives in `standalone/`. Framework Preset stays `Node` (preset `Other` fails the build with `STATIC_BUILD_NO_OUT_DIR` — it wants a `public` output dir).
 
 ## What it does NOT do
 
@@ -80,7 +80,7 @@ BUILT 15 Nov 2026 (`api/prove.js` + `api/health.js` + `vercel.json`) — Render 
 
 ## Files
 
-- `server.mjs` — zero-dependency HTTP server (snarkjs is the only dep).
+- `standalone/server.mjs` — zero-dependency HTTP server (snarkjs is the only dep).
 - `checks.mjs` — the 7 field checks (mirrors the Worker; expiry is STRICT:
   `currentBlock >= expiryBlock` is EXPIRED — proven against the circuit).
 - `fetch-artifacts.sh` — downloads + sha256-verifies the real circuit

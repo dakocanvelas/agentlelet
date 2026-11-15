@@ -1,6 +1,6 @@
 // lucax Gatekeeper prover — Vercel serverless adapter (Node.js).
 //
-// Same proving flow as ../server.mjs (the long-running service):
+// Same proving flow as ../standalone/server.mjs (the long-running service):
 // POST /api/prove with { task_id, input, decision, proof_tx } returns
 // { ok, decision, reason_code, flipped, proof, publicSignals, ms }.
 // The circuit ONLY proves correct decisions — a wrong decision fails
@@ -19,7 +19,7 @@
 // prover as "no proof" and falls back to the +10 no-proof path, so this
 // can never eat a task. Artifacts are downloaded at build time
 // (fetch-artifacts.sh) and bundled via vercel.json includeFiles.
-// NOTE: this file duplicates the proving core of server.mjs on purpose
+// NOTE: this file duplicates the proving core of standalone/server.mjs on purpose
 // (minimal change, no refactor of the tested long-running server) —
 // keep the circuit-input building and the flip logic in sync.
 

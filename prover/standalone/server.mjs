@@ -35,7 +35,7 @@ import http from "node:http";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import * as snarkjs from "snarkjs";
-import { gatekeeperFieldChecks } from "./checks.mjs";
+import { gatekeeperFieldChecks } from "../checks.mjs";
 
 const PORT = Number(process.env.PORT || 3000);
 const SHARED_SECRET = process.env.PROVER_SHARED_SECRET || "";

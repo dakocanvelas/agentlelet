@@ -358,7 +358,7 @@ function recordProofSeen(env, ctx, proofTx) {
   }
 }
 
-// Ask the external Node prover (prover/server.mjs) for a Groth16 proof of
+// Ask the external Node prover (prover/standalone/server.mjs) for a Groth16 proof of
 // a Gatekeeper decision. Returns the prover's result object on success, or
 // null on any failure (caller falls back to the no-proof path). 25s hard
 // cap — the platform's task deadline is 60s, and a correct decision
@@ -486,7 +486,7 @@ async function handleTask(request, env, ctx) {
     ? { decision: "REJECT", reason_code: trap, proof_tx: proofTx }
     : { decision: "APPROVE", reason_code: "VALID_CONDITION", proof_tx: proofTx };
 
-  // Groth16 proof via the external Node prover (prover/server.mjs). The
+  // Groth16 proof via the external Node prover (prover/standalone/server.mjs). The
   // circuit only proves CORRECT decisions, so a prover flip is
   // authoritative — use the prover's decision + reason_code when present.
   // On prover failure/timeout the decision stands WITHOUT a proof.

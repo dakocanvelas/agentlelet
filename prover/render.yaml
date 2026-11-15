@@ -11,7 +11,7 @@ services:
     runtime: node
     rootDir: prover
     buildCommand: npm install --omit=dev && bash fetch-artifacts.sh
-    startCommand: node server.mjs
+    startCommand: node standalone/server.mjs
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV

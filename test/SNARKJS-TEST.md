@@ -172,7 +172,7 @@ circuit WASM was never the blocker; ffjavascript's own curve WASM is.
 
 ## Task 3 — the built solution: external Node prover (`prover/`)
 
-- `prover/server.mjs` — zero-dep Node HTTP service: `POST /prove`,
+- `prover/standalone/server.mjs` — zero-dep Node HTTP service: `POST /prove`,
   `GET /health`. Prove-or-flip: tries the requested decision; on witness
   assert failure tries the flipped decision and returns whichever proves
   (a flip means the caller's field checks disagreed with the circuit).
